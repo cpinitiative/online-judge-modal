@@ -5,17 +5,32 @@ import modal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import requests
+from fastapi.middleware.cors import CORSMiddleware
 
 web_app = FastAPI()
 
+web_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app = modal.App(
     "usaco-judge",
-    image=modal.Image.debian_slim().pip_install("fastapi[standard]", "pydantic", "requests"),
+    image=modal.Image.debian_slim().pip_install(
+        "fastapi[standard]", "pydantic", "requests"
+    ),
     volumes={"/root/data_private": modal.Volume.from_name("usaco-problems")},
 )
 
-COMPILE_URL = "https://v3nuswv3poqzw6giv37wmrt6su0krxvt.lambda-url.us-east-1.on.aws/compile"
-EXECUTE_URL = "https://v3nuswv3poqzw6giv37wmrt6su0krxvt.lambda-url.us-east-1.on.aws/execute"
+COMPILE_URL = (
+    "https://v3nuswv3poqzw6giv37wmrt6su0krxvt.lambda-url.us-east-1.on.aws/compile"
+)
+EXECUTE_URL = (
+    "https://v3nuswv3poqzw6giv37wmrt6su0krxvt.lambda-url.us-east-1.on.aws/execute"
+)
 
 
 def get_usaco_problems():
@@ -43,7 +58,7 @@ class JudgeOneParams:
     result_attrs: dict
 
 
-@app.function()
+@app.function(region="us-east")
 def judge_one(
     params: JudgeOneParams,
 ):
@@ -60,9 +75,9 @@ def judge_one(
                 "stdin": input_data,
                 "timeout_ms": params.timeout_ms,
                 "file_io_name": params.file_io_name,
-            }
+            },
         },
-        headers={"Content-Type": "application/json"}
+        headers={"Content-Type": "application/json"},
     )
     try:
         result = response.json()
@@ -75,7 +90,11 @@ def judge_one(
             output = result["file_output"] or result["stdout"]
             if output.strip() != output_data.strip():
                 result["verdict"] = "wrong_answer"
-        
+
+    result = {
+        **result,
+        **params.result_attrs,
+    }
 
     return f"event: execute\ndata: {json.dumps(result)}\n\n"
 
@@ -86,9 +105,9 @@ def compile(source_code: str, compiler_options: str, language: str):
         json={
             "source_code": source_code,
             "compiler_options": compiler_options,
-            "language": language
+            "language": language,
         },
-        headers={"Content-Type": "application/json"}
+        headers={"Content-Type": "application/json"},
     )
     try:
         return response.json()
@@ -106,11 +125,7 @@ class JudgeRequest(BaseModel):
 @web_app.post("/judge")
 def judge(request: JudgeRequest):
     problems = get_usaco_problems()
-    if not request.problem_id.startswith("usaco-"):
-        raise HTTPException(
-            status_code=400, detail="Problem ID must start with 'usaco-'"
-        )
-    problem_id = request.problem_id[6:]
+    problem_id = request.problem_id
 
     if problem_id not in problems:
         raise HTTPException(status_code=404, detail="Problem not found")
@@ -124,15 +139,16 @@ def judge(request: JudgeRequest):
     probgate_problem_id = usaco_to_probgate_mapping[problem_id]
     probgate_problem = get_probgate_problem(probgate_problem_id)
 
-
     def _judge():
-        compile_result = compile(request.source_code, request.compiler_options, request.language)
+        compile_result = compile(
+            request.source_code, request.compiler_options, request.language
+        )
 
         if "compile_output" in compile_result:
             yield f"event: compile\ndata: {json.dumps(compile_result['compile_output'])}\n\n"
         else:
             yield f"event: compile\ndata: {json.dumps(compile_result)}\n\n"
-        
+
         if "executable" not in compile_result or compile_result["executable"] is None:
             return
 
@@ -145,7 +161,8 @@ def judge(request: JudgeRequest):
                     input_file_path=f"data_private/probgate/problems/{probgate_problem_id}/{test_case['input']}",
                     output_file_path=f"data_private/probgate/problems/{probgate_problem_id}/{test_case['output']}",
                     result_attrs={
-                        "test_case": i + 1,
+                        "test_case": i,
+                        "total_test_cases": len(probgate_problem["tests"]),
                     },
                 )
                 for i, test_case in enumerate(probgate_problem["tests"])
@@ -170,7 +187,7 @@ async def get_usaco_problems_route():
     return problems
 
 
-@app.function()
+@app.function(region="us-east")
 @modal.asgi_app()
 def fastapi_app():
     return web_app
