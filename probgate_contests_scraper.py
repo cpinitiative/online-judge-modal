@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.WARNING)
 REQUEST_DELAY = 0.12  # seconds between requests
 
 # Contest cutoff - don't scrape contests after this date
-CUTOFF_MONTH = 1
+CUTOFF_MONTH = 2
 CUTOFF_YEAR = 25
 
 def parse_contest_date(contest_name):
@@ -341,10 +341,11 @@ def scrape_probgate():
                         if contest_id in existing_contests and 'problems' in existing_contests[contest_id]:
                             print(f"Skipping {contest_name} (ID: {contest_id}) - already scraped")
                             contests[contest_id] = existing_contests[contest_id]
-                            continue
-                        
-                        info = parse_contest_info(contest_name)
-                        if info:
+                        else:
+                            info = parse_contest_info(contest_name)
+                            if not info:
+                                continue
+
                             print(f"Scraping {contest_name} (ID: {contest_id})...")
                             problems = get_contest_problems(session, contest_id)
                             
@@ -356,12 +357,12 @@ def scrape_probgate():
                                 'division': info['division'],
                                 'problems': problems
                             }
-                            
-                            # Save progress after each contest
-                            save_contests(contests)
-                            
+                        
                             # Add a small delay between requests
                             time.sleep(REQUEST_DELAY)
+                        
+                        # Save progress after each contest
+                        save_contests(contests)
         
         print(f"\nSuccessfully saved {len(contests)} contests to 'data_private/probgate/contests.json'")
         return session, contests
