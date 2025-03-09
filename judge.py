@@ -1,5 +1,6 @@
-from dataclasses import dataclass
 import json
+import traceback
+from dataclasses import dataclass
 from fastapi.responses import PlainTextResponse, StreamingResponse
 import modal
 from fastapi import FastAPI, HTTPException
@@ -31,6 +32,9 @@ COMPILE_URL = (
 EXECUTE_URL = (
     "https://v3nuswv3poqzw6giv37wmrt6su0krxvt.lambda-url.us-east-1.on.aws/execute"
 )
+LARGE_INPUT_URL = (
+    "https://v3nuswv3poqzw6giv37wmrt6su0krxvt.lambda-url.us-east-1.on.aws/large-input"
+)
 
 
 def get_usaco_problems():
@@ -58,7 +62,7 @@ class JudgeOneParams:
     result_attrs: dict
 
 
-@app.function(region="us-east")
+@app.function(region="us-east", cloud="aws")
 def judge_one(
     params: JudgeOneParams,
 ):
@@ -67,12 +71,27 @@ def judge_one(
     with open(params.output_file_path, "r") as f:
         output_data = f.read()
 
+    if len(input_data) > 2_000_000:
+        # There's a 6 MB limit for AWS lambda functions
+        response = requests.post(
+            LARGE_INPUT_URL,
+        )
+        result = response.json()
+        requests.put(
+            result["presigned_url"],
+            data=input_data,
+        )
+        stdin, stdin_id = None, result["input_id"]
+    else:
+        stdin, stdin_id = input_data, None
+
     response = requests.post(
         EXECUTE_URL,
         json={
             "executable": params.executable,
             "options": {
-                "stdin": input_data,
+                "stdin": stdin,
+                "stdin_id": stdin_id,
                 "timeout_ms": params.timeout_ms,
                 "file_io_name": params.file_io_name,
             },
@@ -81,6 +100,10 @@ def judge_one(
     )
     try:
         result = response.json()
+
+        if result["full_output_url"] is not None:
+            response = requests.get(result["full_output_url"])
+            result = response.json()
     except requests.JSONDecodeError:
         result = {"internal_error": response.text}
 
@@ -90,6 +113,11 @@ def judge_one(
             output = result["file_output"] or result["stdout"]
             if output.strip() != output_data.strip():
                 result["verdict"] = "wrong_answer"
+
+        result["stdout"] = result["stdout"][:10000]
+        result["stderr"] = result["stderr"][:10000]
+        if result["file_output"] is not None:
+            result["file_output"] = result["file_output"][:10000]
 
     result = {
         **result,
@@ -112,7 +140,7 @@ def compile(source_code: str, compiler_options: str, language: str):
     try:
         return response.json()
     except requests.JSONDecodeError:
-        return {"internal_error": response.text}
+        raise Exception(response.text)
 
 
 class JudgeRequest(BaseModel):
@@ -140,35 +168,42 @@ def judge(request: JudgeRequest):
     probgate_problem = get_probgate_problem(probgate_problem_id)
 
     def _judge():
-        compile_result = compile(
-            request.source_code, request.compiler_options, request.language
-        )
+        try:
+            compile_result = compile(
+                request.source_code, request.compiler_options, request.language
+            )
 
-        if "compile_output" in compile_result:
-            yield f"event: compile\ndata: {json.dumps(compile_result['compile_output'])}\n\n"
-        else:
-            yield f"event: compile\ndata: {json.dumps(compile_result)}\n\n"
+            if "compile_output" in compile_result:
+                yield f"event: compile\ndata: {json.dumps(compile_result['compile_output'])}\n\n"
+            else:
+                yield f"event: compile\ndata: {json.dumps(compile_result)}\n\n"
 
-        if "executable" not in compile_result or compile_result["executable"] is None:
-            return
+            if (
+                "executable" not in compile_result
+                or compile_result["executable"] is None
+            ):
+                return
 
-        yield from judge_one.map(
-            (
-                JudgeOneParams(
-                    executable=compile_result["executable"],
-                    timeout_ms=probgate_problem["time_limit_ms"],
-                    file_io_name=probgate_problem["shortname"],
-                    input_file_path=f"data_private/probgate/problems/{probgate_problem_id}/{test_case['input']}",
-                    output_file_path=f"data_private/probgate/problems/{probgate_problem_id}/{test_case['output']}",
-                    result_attrs={
-                        "test_case": i,
-                        "total_test_cases": len(probgate_problem["tests"]),
-                    },
-                )
-                for i, test_case in enumerate(probgate_problem["tests"])
-            ),
-            order_outputs=False,
-        )
+            yield from judge_one.map(
+                (
+                    JudgeOneParams(
+                        executable=compile_result["executable"],
+                        timeout_ms=probgate_problem["time_limit_ms"],
+                        file_io_name=probgate_problem["shortname"],
+                        input_file_path=f"data_private/probgate/problems/{probgate_problem_id}/{test_case['input']}",
+                        output_file_path=f"data_private/probgate/problems/{probgate_problem_id}/{test_case['output']}",
+                        result_attrs={
+                            "test_case": i,
+                            "total_test_cases": len(probgate_problem["tests"]),
+                        },
+                    )
+                    for i, test_case in enumerate(probgate_problem["tests"])
+                ),
+                order_outputs=False,
+            )
+        except Exception as e:
+            # Kinda dumb but we can't have newlines, so we use repr()
+            yield f"event: error\ndata: {repr(e)}. {repr(traceback.format_exc())}\n\n"
 
     return StreamingResponse(
         _judge(),
