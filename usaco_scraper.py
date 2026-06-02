@@ -107,7 +107,11 @@ def main():
     try:
         with open('data_private/usaco/problems.json', 'r') as f:
             problems = json.load(f)
-        LAST_ID = max(int(id_) for id_ in problems.keys())
+        if problems:
+            LAST_ID = max(int(id_) for id_ in problems.keys())
+        # If problems is blank
+        else:
+            LAST_ID = 0
     except FileNotFoundError:
         problems = {}
         LAST_ID = 0
