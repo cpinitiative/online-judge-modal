@@ -1,0 +1,8 @@
+# Local tools for deploying and scraping. The Modal client version here is the
+# one that gets recorded on the deployed app, so keep it current.
+modal==1.6.4
+fastapi[standard]
+pydantic
+requests
+beautifulsoup4
+python-dotenv
