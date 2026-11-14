@@ -17,23 +17,24 @@ modal run scrape.py
 This scrapes new USACO problems and every probgate contest from a month that
 has already ended, so re-running it after a contest picks up the new problems.
 
-## Importing Test Data From the Old Judge
+## Test Data Probgate Doesn't Have
 
-The old AWS Lambda judge ([cpinitiative/online-judge](https://github.com/cpinitiative/online-judge))
-reads test data from the `cpi-onlinejudge` S3 bucket. That includes problems
-probgate doesn't have, like the CSES problemset. To copy it into the Modal
-volume, create a Modal secret named `aws-cpi-onlinejudge` with
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` for an
-IAM user that can read the bucket, then run:
+`scrape.py` also runs `extra_test_data_scraper.py`, which fills in what
+probgate is missing so this judge covers everything the old Lambda judge did:
 
-```
-modal run import_legacy_data.py
-```
+- USACO problems missing from the probgate mapping, from the test data ZIPs on
+  usaco.org's results pages.
+- The CSES problemset. CSES only shows tests after you've submitted, so this
+  submits a dummy solution to each problem the account hasn't tried yet and then
+  downloads the tests from that submission. It needs a `cses` Modal secret:
 
-The judge uses probgate data for USACO problems when it has it, and falls back
-to the imported data otherwise. `/judge` accepts `1251`, `usaco-1251` or
-`cses-1164`. `GET /problems-with-test-data.json` lists every problem that can
-be judged.
+  ```
+  modal secret create cses CSES_USERNAME=... CSES_PASSWORD=...
+  ```
+
+The judge uses probgate data for USACO problems when it has it, and this data
+otherwise. `/judge` accepts `1251`, `usaco-1251` or `cses-1164`.
+`GET /problems-with-test-data.json` lists every problem that can be judged.
 
 ## Deploying Judge
 

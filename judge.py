@@ -21,10 +21,8 @@ web_app.add_middleware(
 
 app = modal.App(
     "usaco-judge",
-    image=modal.Image.debian_slim()
-    .pip_install("fastapi[standard]", "pydantic", "requests")
-    .add_local_file(
-        "legacy_file_io_names.json", "/root/legacy_file_io_names.json"
+    image=modal.Image.debian_slim().pip_install(
+        "fastapi[standard]", "pydantic", "requests"
     ),
     volumes={"/root/data_private": modal.Volume.from_name("usaco-problems")},
 )
@@ -55,25 +53,16 @@ def get_probgate_problem(problem_id: str):
         return json.load(f)
 
 
-def get_legacy_index():
+def get_extra_index():
     """
-    {problem_id: number of test cases} for test data imported from the old
-    judge (see import_legacy_data.py). Empty if it hasn't been imported.
+    {problem_id: {"num_tests", "time_limit_ms", "file_io_name"}} for test data
+    probgate doesn't have (see extra_test_data_scraper.py).
     """
     try:
-        with open("data_private/legacy/index.json", "r") as f:
+        with open("data_private/extra/index.json", "r") as f:
             return json.load(f)
     except FileNotFoundError:
         return {}
-
-
-def get_legacy_file_io_names():
-    with open("legacy_file_io_names.json", "r") as f:
-        return json.load(f)
-
-
-# The old judge used a 2 second time limit for every problem.
-LEGACY_TIMEOUT_MS = 2000
 
 
 @dataclass
@@ -91,10 +80,10 @@ class ProblemNotFound(Exception):
 def resolve_problem(problem_id: str) -> ResolvedProblem:
     """
     Accepts a USACO problem ID ("1251" or "usaco-1251") or a USACO Guide
-    problem ID for other judges supported by the old judge (e.g. "cses-1164").
+    problem ID for another judge we have test data for (e.g. "cses-1164").
 
     USACO problems use probgate test data when we have it. Otherwise, fall back
-    to the test data imported from the old judge.
+    to the test data from extra_test_data_scraper.py.
     """
     usaco_match = re.fullmatch(r"(?:usaco-)?(\d+)", problem_id)
     if usaco_match:
@@ -115,19 +104,19 @@ def resolve_problem(problem_id: str) -> ResolvedProblem:
                     for test_case in probgate_problem["tests"]
                 ],
             )
-        legacy_id = f"usaco-{usaco_id}"
+        extra_id = f"usaco-{usaco_id}"
     else:
-        legacy_id = problem_id
+        extra_id = problem_id
 
-    num_tests = get_legacy_index().get(legacy_id)
-    if num_tests:
-        problem_dir = f"data_private/legacy/problems/{legacy_id}"
+    extra = get_extra_index().get(extra_id)
+    if extra:
+        problem_dir = f"data_private/extra/problems/{extra_id}"
         return ResolvedProblem(
-            timeout_ms=LEGACY_TIMEOUT_MS,
-            file_io_name=get_legacy_file_io_names().get(legacy_id),
+            timeout_ms=extra["time_limit_ms"],
+            file_io_name=extra["file_io_name"],
             tests=[
                 (f"{problem_dir}/{i}.in", f"{problem_dir}/{i}.out")
-                for i in range(1, num_tests + 1)
+                for i in range(1, extra["num_tests"] + 1)
             ],
         )
 
@@ -299,7 +288,7 @@ async def get_problems_with_test_data_route():
     (e.g. "usaco-1251", "cses-1164").
     """
     problem_ids = {f"usaco-{id}" for id in get_usaco_to_probgate_mapping()}
-    problem_ids.update(get_legacy_index().keys())
+    problem_ids.update(get_extra_index().keys())
     return sorted(problem_ids)
 
 
