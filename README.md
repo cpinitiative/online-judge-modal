@@ -2,6 +2,12 @@
 
 Source code for the online judge backend. WIP
 
+## Setup
+
+```
+pip install -r requirements.txt
+```
+
 ## Scraping Problem Data
 
 ```
