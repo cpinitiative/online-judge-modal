@@ -1,4 +1,5 @@
 import json
+import re
 import traceback
 from dataclasses import dataclass
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -20,8 +21,10 @@ web_app.add_middleware(
 
 app = modal.App(
     "usaco-judge",
-    image=modal.Image.debian_slim().pip_install(
-        "fastapi[standard]", "pydantic", "requests"
+    image=modal.Image.debian_slim()
+    .pip_install("fastapi[standard]", "pydantic", "requests")
+    .add_local_file(
+        "legacy_file_io_names.json", "/root/legacy_file_io_names.json"
     ),
     volumes={"/root/data_private": modal.Volume.from_name("usaco-problems")},
 )
@@ -52,11 +55,92 @@ def get_probgate_problem(problem_id: str):
         return json.load(f)
 
 
+def get_legacy_index():
+    """
+    {problem_id: number of test cases} for test data imported from the old
+    judge (see import_legacy_data.py). Empty if it hasn't been imported.
+    """
+    try:
+        with open("data_private/legacy/index.json", "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def get_legacy_file_io_names():
+    with open("legacy_file_io_names.json", "r") as f:
+        return json.load(f)
+
+
+# The old judge used a 2 second time limit for every problem.
+LEGACY_TIMEOUT_MS = 2000
+
+
+@dataclass
+class ResolvedProblem:
+    timeout_ms: int
+    file_io_name: str | None
+    # (input path, output path) for each test case
+    tests: list[tuple[str, str]]
+
+
+class ProblemNotFound(Exception):
+    pass
+
+
+def resolve_problem(problem_id: str) -> ResolvedProblem:
+    """
+    Accepts a USACO problem ID ("1251" or "usaco-1251") or a USACO Guide
+    problem ID for other judges supported by the old judge (e.g. "cses-1164").
+
+    USACO problems use probgate test data when we have it. Otherwise, fall back
+    to the test data imported from the old judge.
+    """
+    usaco_match = re.fullmatch(r"(?:usaco-)?(\d+)", problem_id)
+    if usaco_match:
+        usaco_id = usaco_match.group(1)
+        usaco_to_probgate_mapping = get_usaco_to_probgate_mapping()
+        if usaco_id in usaco_to_probgate_mapping:
+            probgate_problem_id = usaco_to_probgate_mapping[usaco_id]
+            probgate_problem = get_probgate_problem(probgate_problem_id)
+            problem_dir = f"data_private/probgate/problems/{probgate_problem_id}"
+            return ResolvedProblem(
+                timeout_ms=probgate_problem["time_limit_ms"],
+                file_io_name=probgate_problem["shortname"],
+                tests=[
+                    (
+                        f"{problem_dir}/{test_case['input']}",
+                        f"{problem_dir}/{test_case['output']}",
+                    )
+                    for test_case in probgate_problem["tests"]
+                ],
+            )
+        legacy_id = f"usaco-{usaco_id}"
+    else:
+        legacy_id = problem_id
+
+    num_tests = get_legacy_index().get(legacy_id)
+    if num_tests:
+        problem_dir = f"data_private/legacy/problems/{legacy_id}"
+        return ResolvedProblem(
+            timeout_ms=LEGACY_TIMEOUT_MS,
+            file_io_name=get_legacy_file_io_names().get(legacy_id),
+            tests=[
+                (f"{problem_dir}/{i}.in", f"{problem_dir}/{i}.out")
+                for i in range(1, num_tests + 1)
+            ],
+        )
+
+    if usaco_match and usaco_match.group(1) not in get_usaco_problems():
+        raise ProblemNotFound("Problem not found")
+    raise ProblemNotFound("We don't have test data for this problem yet.")
+
+
 @dataclass
 class JudgeOneParams:
     executable: dict
     timeout_ms: int
-    file_io_name: str
+    file_io_name: str | None
     input_file_path: str
     output_file_path: str
     result_attrs: dict
@@ -152,20 +236,10 @@ class JudgeRequest(BaseModel):
 
 @web_app.post("/judge")
 def judge(request: JudgeRequest):
-    problems = get_usaco_problems()
-    problem_id = request.problem_id
-
-    if problem_id not in problems:
-        raise HTTPException(status_code=404, detail="Problem not found")
-
-    usaco_to_probgate_mapping = get_usaco_to_probgate_mapping()
-    if problem_id not in usaco_to_probgate_mapping:
-        raise HTTPException(
-            status_code=404, detail="We don't have test data for this problem yet."
-        )
-
-    probgate_problem_id = usaco_to_probgate_mapping[problem_id]
-    probgate_problem = get_probgate_problem(probgate_problem_id)
+    try:
+        problem = resolve_problem(request.problem_id)
+    except ProblemNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
     def _judge():
         try:
@@ -188,16 +262,18 @@ def judge(request: JudgeRequest):
                 (
                     JudgeOneParams(
                         executable=compile_result["executable"],
-                        timeout_ms=probgate_problem["time_limit_ms"],
-                        file_io_name=probgate_problem["shortname"],
-                        input_file_path=f"data_private/probgate/problems/{probgate_problem_id}/{test_case['input']}",
-                        output_file_path=f"data_private/probgate/problems/{probgate_problem_id}/{test_case['output']}",
+                        timeout_ms=problem.timeout_ms,
+                        file_io_name=problem.file_io_name,
+                        input_file_path=input_file_path,
+                        output_file_path=output_file_path,
                         result_attrs={
                             "test_case": i,
-                            "total_test_cases": len(probgate_problem["tests"]),
+                            "total_test_cases": len(problem.tests),
                         },
                     )
-                    for i, test_case in enumerate(probgate_problem["tests"])
+                    for i, (input_file_path, output_file_path) in enumerate(
+                        problem.tests
+                    )
                 ),
                 order_outputs=False,
             )
@@ -214,6 +290,17 @@ def judge(request: JudgeRequest):
 @web_app.get("/")
 async def root():
     return PlainTextResponse("Judge OK")
+
+
+@web_app.get("/problems-with-test-data.json")
+async def get_problems_with_test_data_route():
+    """
+    IDs of every problem that can be judged, in the same format /judge accepts
+    (e.g. "usaco-1251", "cses-1164").
+    """
+    problem_ids = {f"usaco-{id}" for id in get_usaco_to_probgate_mapping()}
+    problem_ids.update(get_legacy_index().keys())
+    return sorted(problem_ids)
 
 
 @web_app.get("/usaco-problems.json")
