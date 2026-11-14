@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+from datetime import date
 import logging
 import zipfile
 import io
@@ -17,9 +18,9 @@ logging.basicConfig(level=logging.WARNING)
 # Constants
 REQUEST_DELAY = 0.12  # seconds between requests
 
-# Contest cutoff - don't scrape contests after this date
-CUTOFF_MONTH = 2
-CUTOFF_YEAR = 25
+# Only scrape contests from months that have already ended, so that we don't
+# pick up a contest that's still in progress. (This used to be a hardcoded
+# cutoff that had to be bumped by hand after every contest.)
 
 def parse_contest_date(contest_name):
     """Parse month and year from contest name (e.g., 'DEC24 Bronze')"""
@@ -45,28 +46,20 @@ def parse_contest_date(contest_name):
     except ValueError:
         return None, None
 
-def is_contest_before_cutoff(contest_name):
-    """Check if contest is before or at the cutoff date"""
+def is_contest_before_cutoff(contest_name, today=None):
+    """Check if the contest took place in a month that has already ended"""
     month, year = parse_contest_date(contest_name)
     if month is None or year is None:
         return False
-        
+
     # Convert 2-digit year to comparable format
     if year > 90:  # Assume 90-99 means 1990-1999
         year += 1900
     else:  # Assume 00-89 means 2000-2089
         year += 2000
-        
-    cutoff_year = 2000 + CUTOFF_YEAR
-    
-    # Compare years first
-    if year < cutoff_year:
-        return True
-    if year > cutoff_year:
-        return False
-        
-    # If same year, compare months
-    return month <= CUTOFF_MONTH
+
+    today = today or date.today()
+    return (year, month) < (today.year, today.month)
 
 def parse_contest_info(contest_name):
     """Parse contest name into month, year, and division"""
@@ -338,7 +331,8 @@ def scrape_probgate():
                             continue
                         
                         # Skip if we already have this contest and its problems
-                        if contest_id in existing_contests and 'problems' in existing_contests[contest_id]:
+                        # (Re-scrape contests that were scraped before their problems were added.)
+                        if contest_id in existing_contests and existing_contests[contest_id].get('problems'):
                             print(f"Skipping {contest_name} (ID: {contest_id}) - already scraped")
                             contests[contest_id] = existing_contests[contest_id]
                         else:
